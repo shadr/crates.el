@@ -19,6 +19,8 @@
 ;;
 ;;; Code:
 
+(require 'cl-lib)
+
 (cl-defstruct version-string major minor patch)
 
 (defun cargo-toml--parse-version-string (str)

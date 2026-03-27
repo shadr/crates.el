@@ -18,6 +18,7 @@
 ;; Features:
 ;; - Shows latest crate version from crates.io as virtual text
 ;; - Async version fetching to avoid blocking
+;; - Smart caching: only fetches on first visit or when new dependency is added
 ;;
 ;; Usage:
 ;; Enable with `M-x cargo-toml-mode' or add to hook:
@@ -26,7 +27,8 @@
 ;; Keybindings:
 ;; - `C-c C-l' - Update latest version at point
 ;; - `C-c C-a' - Update all crate versions
-;; - `C-c C-r' - Refresh all overlays
+;; - `C-c C-r' - Refresh all overlays (force refetch)
+;; - `C-c C-c' - Clear visited cache (for manual refetch)
 ;;
 ;;; Code:
 
@@ -75,28 +77,25 @@
 (defvar-local cargo-toml--pending-requests nil
   "Track pending async requests to avoid duplicates in current buffer.")
 
+(defvar-local cargo-toml--visited-dependencies nil
+  "Set of dependencies that have already been visited/fetched.")
+
 (defun cargo-toml--init-buffers-local-vars ()
   "Initialize buffer-local variables."
   (unless cargo-toml--version-cache
     (setq cargo-toml--version-cache (make-hash-table :test 'equal)))
   (unless cargo-toml--pending-requests
-    (setq cargo-toml--pending-requests (make-hash-table :test 'equal))))
+    (setq cargo-toml--pending-requests (make-hash-table :test 'equal)))
+  (unless cargo-toml--visited-dependencies
+    (setq cargo-toml--visited-dependencies (make-hash-table :test 'equal))))
 
 ;;;###autoload
 (define-minor-mode cargo-toml-mode
   "Minor mode for editing Cargo.toml files.
 
 Displays the latest available version of crates as virtual text
-at the end of dependency declaration lines.
-
-Commands:
-\\{cargo-toml-mode-map}"
+at the end of dependency declaration lines."
   :lighter " Cargo"
-  :keymap (let ((map (make-sparse-keymap)))
-            (define-key map (kbd "C-c C-l") #'cargo-toml-update-version-at-point)
-            (define-key map (kbd "C-c C-a") #'cargo-toml-update-all-versions)
-            (define-key map (kbd "C-c C-r") #'cargo-toml-refresh-overlays)
-            map)
   (if cargo-toml-mode
       (cargo-toml--enable)
     (cargo-toml--disable)))
@@ -121,8 +120,11 @@ Commands:
     (clrhash cargo-toml--version-cache))
   (when cargo-toml--pending-requests
     (clrhash cargo-toml--pending-requests))
+  (when cargo-toml--visited-dependencies
+    (clrhash cargo-toml--visited-dependencies))
   (setq cargo-toml--version-cache nil)
-  (setq cargo-toml--pending-requests nil))
+  (setq cargo-toml--pending-requests nil)
+  (setq cargo-toml--visited-dependencies nil))
 
 (defun cargo-toml--remove-all-overlays ()
   "Remove all cargo-toml overlays from the current buffer."
@@ -134,7 +136,8 @@ Commands:
 _BEG, _END, and _LEN are the change boundaries and length."
   (when cargo-toml-mode
     (cargo-toml--remove-all-overlays)
-    (cargo-toml-refresh-overlays)))
+    ;; Only refresh overlays for new dependencies, not all
+    (cargo-toml-refresh-overlays-for-new-dependencies)))
 
 (defvar-local cargo-toml--in-dependencies-section nil
   "Track if we're currently in a dependencies section.")
@@ -245,87 +248,63 @@ LATEST is the latest available version."
     (overlay-put overlay 'after-string display-str)
     (overlay-put overlay 'cargo-toml t)
     (overlay-put overlay 'evaporate t)
-    (push overlay cargo-toml--overlays)
-    (message "Created overlay for %s: %s -> %s" version latest display-str)))
+    (push overlay cargo-toml--overlays)))
 
-(defun cargo-toml--update-overlay-for-dependency (dep)
-  "Create or update overlay for a single dependency DEP."
-  (let ((crate (plist-get dep :crate))
-        (version (plist-get dep :version))
-        (pos (plist-get dep :position))
-        (buffer (current-buffer)))
-    (cargo-toml--fetch-latest-version
-     crate
-     (lambda (latest)
-       (when (and latest (buffer-live-p buffer))
-         (with-current-buffer buffer
-           (save-excursion
-             (goto-char pos)
-             (message "Found version string, comparing %s < %s = %s"
-                      version latest (version-string-less version latest))
-             (cargo-toml--create-overlay version latest))))))))
+(defun cargo-toml--update-overlay-for-dependency (dep &optional force-fetch)
+  "Create or update overlay for a single dependency DEP.
+If FORCE-FETCH is non-nil, fetch the latest version even if already visited."
+  (let* ((crate (plist-get dep :crate))
+         (version (plist-get dep :version))
+         (pos (plist-get dep :position))
+         (buffer (current-buffer))
+         (visited-dep-key (format "%s:%s" crate version)))
+    (cond
+     ;; Fetch if not already visited or if force-fetch is requested
+     ((or force-fetch (not (gethash visited-dep-key cargo-toml--visited-dependencies)))
+      (puthash visited-dep-key t cargo-toml--visited-dependencies)
+      (cargo-toml--fetch-latest-version
+       crate
+       (lambda (latest)
+         (when (and latest (buffer-live-p buffer))
+           (with-current-buffer buffer
+             (save-excursion
+               (goto-char pos)
+               (cargo-toml--create-overlay version latest)))))))
+     ;; If already visited and we have cached version, create overlay immediately
+     ((gethash crate cargo-toml--version-cache)
+      (let ((latest (gethash crate cargo-toml--version-cache)))
+        (with-current-buffer buffer
+          (save-excursion
+            (goto-char pos)
+            (cargo-toml--create-overlay version latest))))))))
 
 ;;;###autoload
 (defun cargo-toml-refresh-overlays ()
-  "Refresh all version overlays in the current buffer."
+  "Refresh all version overlays in the current buffer.
+Fetches versions for all dependencies regardless of visited status."
   (interactive)
   (when cargo-toml-mode
     (cargo-toml--remove-all-overlays)
     (let ((dependencies (cargo-toml--find-dependencies)))
       (dolist (dep dependencies)
-        (cargo-toml--update-overlay-for-dependency dep)))))
+        (cargo-toml--update-overlay-for-dependency dep t)))))
 
 ;;;###autoload
-(defun cargo-toml-update-version-at-point ()
-  "Update the crate version at point to the latest available version."
-  (interactive)
-  (let ((dep (cargo-toml--parse-dependency-line)))
-    (when dep
-      (let ((crate (plist-get dep :crate))
-            (version (plist-get dep :version))
-            (pos (plist-get dep :position))
-            (buffer (current-buffer)))
-        (cargo-toml--fetch-latest-version
-         crate
-         (lambda (latest)
-           (when (and latest (buffer-live-p buffer))
-             (with-current-buffer buffer
-               (save-excursion
-                 (goto-char pos)
-                 (beginning-of-line)
-                 (when (re-search-forward (format "\"%s\"" (regexp-quote version))
-                                          (line-end-position) t)
-                   (replace-match (format "\"%s\"" latest) t t nil 0)
-                   (message "Updated %s to version %s" crate latest)))))))))))
+(defun cargo-toml-refresh-overlays-for-new-dependencies ()
+  "Refresh overlays only for new dependencies not yet visited."
+  (when cargo-toml-mode
+    (let ((dependencies (cargo-toml--find-dependencies)))
+      (dolist (dep dependencies)
+        (cargo-toml--update-overlay-for-dependency dep nil)))))
 
 ;;;###autoload
-(defun cargo-toml-update-all-versions ()
-  "Update all crate versions in the buffer to their latest available versions."
+(defun cargo-toml-clear-visited-cache ()
+  "Clear the visited dependencies cache.
+This will cause all dependencies to be refetched on next refresh."
   (interactive)
-  (let ((dependencies (cargo-toml--find-dependencies)))
-    (if (null dependencies)
-        (message "No dependencies found")
-      (message "Updating %d dependencies..." (length dependencies))
-      (let ((count 0)
-            (buffer (current-buffer)))
-        (dolist (dep dependencies)
-          (let ((crate (plist-get dep :crate))
-                (version (plist-get dep :version))
-                (pos (plist-get dep :position)))
-            (cargo-toml--fetch-latest-version
-             crate
-             (lambda (latest)
-               (when (and latest (buffer-live-p buffer))
-                 (with-current-buffer buffer
-                   (save-excursion
-                     (goto-char pos)
-                     (beginning-of-line)
-                     (when (re-search-forward (format "\"%s\"" (regexp-quote version))
-                                              (line-end-position) t)
-                       (replace-match (format "\"%s\"" latest) t t nil 0)
-                       (cl-incf count)
-                       (message "Updated %d/%d dependencies" count (length dependencies))))))))))
-        (run-at-time 2 nil (lambda () (message "Updated %d dependencies" count)))))))
+  (when cargo-toml--visited-dependencies
+    (clrhash cargo-toml--visited-dependencies))
+  (message "Cleared visited dependencies cache"))
 
 ;; ;;;###autoload
 ;; (add-to-list 'auto-mode-alist '("Cargo\\.toml\\'" . cargo-toml-mode))
