@@ -4,6 +4,8 @@
 
 A minor mode for Emacs that displays the latest available version of Rust crates as virtual text in `Cargo.toml` files.
 
+![Screenshot of a Cargo.toml buffer with latest crates version visible as a virtual text.](/assets/screenshot.png)
+
 ## Installation
 
 ### Manual Installation
