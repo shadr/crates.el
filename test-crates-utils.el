@@ -2,8 +2,8 @@
 ;;
 ;; Copyright (C) 2026 shadr
 ;;
-;; Author: shadr <shadr@nixos>
-;; Maintainer: shadr <shadr@nixos>
+;; Author: shadr <shadr.nn@gmail.com>
+;; Maintainer: shadr <shadr.nn@gmail.com>
 ;; Version: 0.0.1
 ;; Keywords: tools
 ;; Homepage: https://github.com/shadr/crates.el

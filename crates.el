@@ -2,8 +2,8 @@
 ;;
 ;; Copyright (C) 2026 shadr
 ;;
-;; Author: shadr <shadr@nixos>
-;; Maintainer: shadr <shadr@nixos>
+;; Author: shadr <shadr.nn@gmail.com>
+;; Maintainer: shadr <shadr.nn@gmail.com>
 ;; Version: 0.1.0
 ;; Homepage: https://github.com/shadr/crates.el
 ;; Package-Requires: ((emacs "24.3"))
@@ -22,13 +22,7 @@
 ;;
 ;; Usage:
 ;; Enable with `M-x crates-mode' or add to hook:
-;;   (add-hook 'toml-mode-hook #'crates-mode)
-;;
-;; Keybindings:
-;; - `C-c C-l' - Update latest version at point
-;; - `C-c C-a' - Update all crate versions
-;; - `C-c C-r' - Refresh all overlays (force refetch)
-;; - `C-c C-c' - Clear visited cache (for manual refetch)
+;;   (add-hook 'find-file-hook (lambda () (when (string= (file-name-nondirectory buffer-file-name) "Cargo.toml") (crates-mode))))
 ;;
 ;;; Code:
 
@@ -99,12 +93,6 @@ at the end of dependency declaration lines.
 Commands:
 \\{crates-mode-map}"
   :lighter " Crates"
-  :keymap (let ((map (make-sparse-keymap)))
-            (define-key map (kbd "C-c C-l") #'crates-update-version-at-point)
-            (define-key map (kbd "C-c C-a") #'crates-update-all-versions)
-            (define-key map (kbd "C-c C-r") #'crates-refresh-overlays)
-            (define-key map (kbd "C-c C-c") #'crates-clear-visited-cache)
-            map)
   (if crates-mode
       (crates--enable)
     (crates--disable)))
@@ -305,64 +293,6 @@ Fetches versions for all dependencies regardless of visited status."
         (crates--update-overlay-for-dependency dep nil)))))
 
 ;;;###autoload
-(defun crates-update-version-at-point ()
-  "Update the crate version at point to the latest available version."
-  (interactive)
-  (let ((dep (crates--parse-dependency-line)))
-    (when dep
-      (let ((crate (plist-get dep :crate))
-            (version (plist-get dep :version))
-            (pos (plist-get dep :position))
-            (buffer (current-buffer))
-            (visited-dep-key (format "%s:%s" crate version)))
-        ;; Mark as visited since user is interacting with this dependency
-        (puthash visited-dep-key t crates--visited-dependencies)
-        (crates--fetch-latest-version
-         crate
-         (lambda (latest)
-           (when (and latest (buffer-live-p buffer))
-             (with-current-buffer buffer
-               (save-excursion
-                 (goto-char pos)
-                 (beginning-of-line)
-                 (when (re-search-forward (format "\"%s\"" (regexp-quote version))
-                                          (line-end-position) t)
-                   (replace-match (format "\"%s\"" latest) t t nil 0)
-                   (message "Updated %s to version %s" crate latest)))))))))))
-
-;;;###autoload
-(defun crates-update-all-versions ()
-  "Update all crate versions in the buffer to their latest available versions."
-  (interactive)
-  (let ((dependencies (crates--find-dependencies)))
-    (if (null dependencies)
-        (message "No dependencies found")
-      (message "Updating %d dependencies..." (length dependencies))
-      (let ((count 0)
-            (buffer (current-buffer)))
-        (dolist (dep dependencies)
-          (let ((crate (plist-get dep :crate))
-                (version (plist-get dep :version))
-                (pos (plist-get dep :position))
-                (visited-dep-key (format "%s:%s" crate version)))
-            ;; Mark as visited since user is updating all
-            (puthash visited-dep-key t crates--visited-dependencies)
-            (crates--fetch-latest-version
-             crate
-             (lambda (latest)
-               (when (and latest (buffer-live-p buffer))
-                 (with-current-buffer buffer
-                   (save-excursion
-                     (goto-char pos)
-                     (beginning-of-line)
-                     (when (re-search-forward (format "\"%s\"" (regexp-quote version))
-                                              (line-end-position) t)
-                       (replace-match (format "\"%s\"" latest) t t nil 0)
-                       (cl-incf count)
-                       (message "Updated %d/%d dependencies" count (length dependencies))))))))))
-        (run-at-time 2 nil (lambda () (message "Updated %d dependencies" count)))))))
-
-;;;###autoload
 (defun crates-clear-visited-cache ()
   "Clear the visited dependencies cache.
 This will cause all dependencies to be refetched on next refresh."
@@ -370,9 +300,6 @@ This will cause all dependencies to be refetched on next refresh."
   (when crates--visited-dependencies
     (clrhash crates--visited-dependencies))
   (message "Cleared visited dependencies cache"))
-
-;; ;;;###autoload
-;; (add-to-list 'auto-mode-alist '("Cargo\\.toml\\'" . crates-mode))
 
 (provide 'crates)
 ;;; crates.el ends here
